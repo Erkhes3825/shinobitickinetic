@@ -17,6 +17,7 @@ public class ShadowStepAbility : MonoBehaviour
     [SerializeField] LayerMask groundMask = ~0;   // ワープ先にできる面
     [SerializeField] LayerMask occluderMask = ~0; // 影を作る遮蔽物
     [SerializeField] float maxRange = 25f;
+    [SerializeField, Range(0f, 1f)] float minGroundNormalY = 0.7f;   // 床とみなす面の傾き(1=真上向き。壁の側面は除外)
 
     [Header("コスト")]
     [SerializeField] float cooldown = 0.6f;
@@ -50,8 +51,12 @@ public class ShadowStepAbility : MonoBehaviour
     {
         targetValid = false;
 
+        // 自分(Playerレイヤー)は、照準の判定に含めない。Defaultレイヤーのままの場合は、壁まで除外するので何もしない
+        int selfLayer = gameObject.layer;
+        LayerMask mask = selfLayer == 0 ? groundMask : (LayerMask)(groundMask.value & ~(1 << selfLayer));
+
         Ray ray = aimCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
-        if (Physics.Raycast(ray, out RaycastHit hit, maxRange, groundMask,
+        if (Physics.Raycast(ray, out RaycastHit hit, maxRange, mask,
                             QueryTriggerInteraction.Ignore))
         {
             // 面から少し浮かせた位置で影判定(自己遮蔽を避ける)
@@ -65,7 +70,8 @@ public class ShadowStepAbility : MonoBehaviour
                 cc.radius * 0.9f, occluderMask, QueryTriggerInteraction.Ignore);
 
             targetPoint = hit.point + hit.normal * 0.05f;
-            targetValid = inShadow && hasRoom;
+            bool isFloor = hit.normal.y >= minGroundNormalY;   // 壁の側面には、ワープしない
+            targetValid = inShadow && hasRoom && isFloor;
 
             if (marker != null)
             {
@@ -89,11 +95,16 @@ public class ShadowStepAbility : MonoBehaviour
         Teleport(targetPoint);
     }
 
-    void Teleport(Vector3 destination)
+    void Teleport(Vector3 feetPosition)
     {
+        // transform.position は足元ではなく、Capsuleの中心にある。
+        // 足元が目標の地点に来るように、中心の位置を計算する(体が地面に埋まらないように)
+        Vector3 pivotOffset = Vector3.up * (cc.height * 0.5f) - cc.center;
+        Vector3 pivotPosition = feetPosition + pivotOffset + Vector3.up * cc.skinWidth;
+
         // CharacterControllerは無効化しないと位置を直接書き換えられない
         cc.enabled = false;
-        transform.position = destination;
+        transform.position = pivotPosition;
         cc.enabled = true;
 
         if (playerController != null) playerController.ResetVerticalVelocity();

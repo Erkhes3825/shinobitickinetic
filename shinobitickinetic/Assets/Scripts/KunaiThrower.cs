@@ -21,21 +21,24 @@ public class KunaiThrower : MonoBehaviour
     [SerializeField] float throwSpeed = 50f;
     [SerializeField] float cooldown = 0.4f;
     [SerializeField] float maxAimDistance = 60f;
-    [SerializeField] LayerMask aimMask = ~0;       // Environment + Breakable を設定
+    [SerializeField] bool limitDownAngle = true;   // 下向きに、投げすぎないようにする
+    [SerializeField] float maxDownAngle = 10f;     // 下向きの上限(度)。手前の地面を狙っても、これ以上は下を向かない
+    [SerializeField] LayerMask aimMask = ~0;       // 照準と、クナイが当たる対象。Environment + Breakable(敵に当てるなら Enemy も)
 
-    [Header("入力")]
-    [SerializeField]
-    InputAction throwAction = new InputAction("Throw", InputActionType.Button, "<Mouse>/leftButton");
+    [Header("デバッグ")]
+    [SerializeField] bool logThrowSource = true;   // 何のキー/ボタンで投げたかを、Consoleに表示する
 
-    Collider playerCollider;
+    // 入力はコードで定義する(Inspectorに保存されて、割り当てが勝手に変わるのを防ぐため)
+    readonly InputAction throwAction = new InputAction("Throw", InputActionType.Button);
+
     float nextThrowTime;
 
     void Awake()
     {
-        playerCollider = GetComponent<Collider>();   // CharacterControllerもColliderを継承している
         if (aimCamera == null) aimCamera = Camera.main;
 
-        // ゲームパッドのトリガーも使えるようにする(Awakeで1回だけ追加)
+        // 投げるボタン: マウス左クリック と ゲームパッドの右トリガー のみ
+        throwAction.AddBinding("<Mouse>/leftButton");
         throwAction.AddBinding("<Gamepad>/rightTrigger");
     }
 
@@ -51,18 +54,25 @@ public class KunaiThrower : MonoBehaviour
         throwAction.Disable();
     }
 
-    void OnThrow(InputAction.CallbackContext _)
+    void OnThrow(InputAction.CallbackContext ctx)
     {
+        if (logThrowSource && ctx.control != null)
+            Debug.Log($"[KunaiThrower] 発射トリガー: {ctx.control.path}");
+
         if (Time.time < nextThrowTime || kunaiPrefab == null || aimCamera == null) return;
         if (Cursor.lockState != CursorLockMode.Locked) return;   // カーソル解除中は投げない
         nextThrowTime = Time.time + cooldown;
 
+        // 自分(Playerレイヤー)は、狙いにも命中にも含めない(Aim Maskの設定ミス対策)。
+        // ただし Default レイヤーのままの場合は、壁まで除外してしまうので、何もしない
+        int selfLayer = gameObject.layer;
+        LayerMask mask = selfLayer == 0 ? aimMask : (LayerMask)(aimMask.value & ~(1 << selfLayer));
+
         // 画面中央が指す点を求める
         Ray ray = aimCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
-        Vector3 target = Physics.Raycast(ray, out RaycastHit hit, maxAimDistance, aimMask,
-                                         QueryTriggerInteraction.Ignore)
-            ? hit.point
-            : ray.origin + ray.direction * maxAimDistance;
+        bool aimHit = Physics.Raycast(ray, out RaycastHit hit, maxAimDistance, mask,
+                                      QueryTriggerInteraction.Ignore);
+        Vector3 target = aimHit ? hit.point : ray.origin + ray.direction * maxAimDistance;
 
         // 発射の基準点(プレイヤーの胸あたり)から、狙いの点へ向かう方向
         Vector3 origin = transform.position + Vector3.up * spawnHeight;
@@ -72,6 +82,25 @@ public class KunaiThrower : MonoBehaviour
         // 狙いが背後や真横になってしまう場合(壁に近すぎる等)は、カメラの向きで投げる
         if (toTarget.sqrMagnitude < 0.01f || Vector3.Dot(dir, ray.direction) < 0.3f)
             dir = ray.direction;
+
+        // 下向きすぎる場合は、手前の地面に刺さらないよう、角度を制限する
+        float downAngleBefore = Mathf.Asin(Mathf.Clamp(-dir.y, -1f, 1f)) * Mathf.Rad2Deg;
+        if (limitDownAngle && downAngleBefore > maxDownAngle)
+        {
+            Vector3 flatDir = new Vector3(dir.x, 0f, dir.z);
+            if (flatDir.sqrMagnitude > 0.0001f)
+            {
+                float a = maxDownAngle * Mathf.Deg2Rad;
+                dir = (flatDir.normalized * Mathf.Cos(a) + Vector3.down * Mathf.Sin(a)).normalized;
+            }
+        }
+
+        if (logThrowSource)
+        {
+            float downAngleAfter = Mathf.Asin(Mathf.Clamp(-dir.y, -1f, 1f)) * Mathf.Rad2Deg;
+            string aimName = aimHit ? hit.collider.name : "何もなし";
+            Debug.Log($"[KunaiThrower] 照準の先: {aimName} / 下向き {downAngleBefore:F1}° → {downAngleAfter:F1}°");
+        }
 
         // 照準方向へ少し前に出す。ただし、目標が近いときは、目標を越えないようにする
         float forward = Mathf.Min(spawnForward, toTarget.magnitude * 0.5f);
@@ -86,14 +115,8 @@ public class KunaiThrower : MonoBehaviour
         }
 
         Kunai k = Instantiate(kunaiPrefab, spawnPos, Quaternion.LookRotation(dir));
-        // 自分に当たらないように(コライダーが子オブジェクトにあっても対応)
-        if (playerCollider != null)
-        {
-            foreach (var kCol in k.GetComponentsInChildren<Collider>())
-                Physics.IgnoreCollision(kCol, playerCollider);
-        }
-
-        k.Launch(dir * throwSpeed);
+        // 当たる対象は mask のレイヤーだけ(自分の体には、当たらない)
+        k.Launch(dir * throwSpeed, mask);
     }
 
     // 選択中に、クナイの出現位置の目安(黄色い球)を表示する
