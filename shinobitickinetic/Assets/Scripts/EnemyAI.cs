@@ -56,7 +56,7 @@ public class EnemyAI : MonoBehaviour
         EnterPatrol();
     }
 
-    void OnEnable()  { BreakableLight.Broken += OnLightBroken; }
+    void OnEnable() { BreakableLight.Broken += OnLightBroken; }
     void OnDisable() { BreakableLight.Broken -= OnLightBroken; }
 
     // ライトが壊れた音を聞いたら、その場所を調べに行く
@@ -79,10 +79,10 @@ public class EnemyAI : MonoBehaviour
 
         switch (state)
         {
-            case State.Patrol:     TickPatrol();           break;
-            case State.Suspicious: TickSuspicious();       break;
-            case State.Chase:      TickChase(seen);        break;
-            case State.Search:     TickSearch();           break;
+            case State.Patrol: TickPatrol(); break;
+            case State.Suspicious: TickSuspicious(); break;
+            case State.Chase: TickChase(seen); break;
+            case State.Search: TickSearch(); break;
         }
 
         UpdateStatusColor();
@@ -233,9 +233,14 @@ public class EnemyAI : MonoBehaviour
 
     void Caught()
     {
+        // すでにゲームが終わっている場合は、何もしない(毎フレーム呼ばれるため)
+        if (GameManager.Instance != null && !GameManager.Instance.IsPlaying) return;
+
         Debug.Log("見つかった!");
-        // 仮のゲームオーバー処理: シーンを再読み込み(Build Settingsにシーン登録が必要)
-        SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
+        if (GameManager.Instance != null)
+            GameManager.Instance.Lose("CAUGHT!");
+        else
+            SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);   // 保険
     }
 
     void UpdateStatusColor()
@@ -243,10 +248,10 @@ public class EnemyAI : MonoBehaviour
         if (statusRenderer == null) return;
         Color c = state switch
         {
-            State.Patrol     => Color.white,
+            State.Patrol => Color.white,
             State.Suspicious => Color.yellow,
-            State.Chase      => Color.red,
-            _                => new Color(1f, 0.55f, 0f), // Search: オレンジ
+            State.Chase => Color.red,
+            _ => new Color(1f, 0.55f, 0f), // Search: オレンジ
         };
         statusRenderer.material.color = c;
     }
@@ -256,8 +261,8 @@ public class EnemyAI : MonoBehaviour
     {
         Transform e = eyes != null ? eyes : transform;
         Gizmos.color = Color.yellow;
-        Vector3 left  = Quaternion.Euler(0, -viewAngle * 0.5f, 0) * e.forward;
-        Vector3 right = Quaternion.Euler(0,  viewAngle * 0.5f, 0) * e.forward;
+        Vector3 left = Quaternion.Euler(0, -viewAngle * 0.5f, 0) * e.forward;
+        Vector3 right = Quaternion.Euler(0, viewAngle * 0.5f, 0) * e.forward;
         Gizmos.DrawRay(e.position, left * viewDistance);
         Gizmos.DrawRay(e.position, right * viewDistance);
         Gizmos.color = Color.cyan;

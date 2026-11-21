@@ -1,8 +1,10 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// シーン内のライト一覧を共有キャッシュする。
+/// シーン内の「ゲームに関わるライト」の一覧を共有キャッシュする。
 /// 敵やプレイヤーが個別に検索しないよう、0.5秒ごとにまとめて更新する。
+/// DecorativeLight が付いたライト(見た目専用)は、一覧に含めない。
 /// </summary>
 public static class LightRegistry
 {
@@ -25,7 +27,14 @@ public static class LightRegistry
         {
             if (Time.time >= nextRefresh)
             {
-                cache = Object.FindObjectsByType<Light>(FindObjectsSortMode.None);
+                Light[] found = Object.FindObjectsByType<Light>(FindObjectsSortMode.None);
+                var gameplayLights = new List<Light>(found.Length);
+                foreach (var l in found)
+                {
+                    if (l.GetComponent<DecorativeLight>() == null)
+                        gameplayLights.Add(l);
+                }
+                cache = gameplayLights.ToArray();
                 nextRefresh = Time.time + RefreshInterval;
             }
             return cache;
