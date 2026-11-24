@@ -4,6 +4,9 @@ using UnityEngine.InputSystem;
 /// <summary>
 /// 影渡り: カメラ中心が指す地点が影の中なら、そこへワープする。
 /// プレイヤー(CharacterController付き)にアタッチして使う。
+///
+/// 判定に使うレイヤーは、シーンのレイヤー設定に依存せず自動で決める
+/// (地形が Default でも Environment でも動くようにするため)。
 /// </summary>
 [RequireComponent(typeof(CharacterController))]
 public class ShadowStepAbility : MonoBehaviour
@@ -14,10 +17,11 @@ public class ShadowStepAbility : MonoBehaviour
     [SerializeField] Renderer markerRenderer;
 
     [Header("判定")]
-    [SerializeField] LayerMask groundMask = ~0;   // ワープ先にできる面
-    [SerializeField] LayerMask occluderMask = ~0; // 影を作る遮蔽物
-    [SerializeField] float maxRange = 25f;
+    [SerializeField] float maxRange = 25f;        // カメラ中心から、ワープ先を探す距離
     [SerializeField, Range(0f, 1f)] float minGroundNormalY = 0.7f;   // 床とみなす面の傾き(1=真上向き。壁の側面は除外)
+    [SerializeField] float shadowProbeHeight = 1f;                   // 影かどうかを調べる高さ(足元から)。敵の視界判定と同じ胸の高さ
+    [SerializeField, Range(0.5f, 1f)] float clearanceScale = 0.9f;   // 着地点に体が収まるかの判定の厳しさ
+    [SerializeField] bool requireClearPath = true;                   // 壁や扉ごしにワープしない
 
     [Header("コスト")]
     [SerializeField] float cooldown = 0.6f;
@@ -26,21 +30,65 @@ public class ShadowStepAbility : MonoBehaviour
     [SerializeField]
     InputAction stepAction = new InputAction("ShadowStep", InputActionType.Button, "<Keyboard>/f");
 
+    // RaycastNonAlloc 用の使い回しバッファ(GC負荷を避ける)
+    static readonly RaycastHit[] AimHits = new RaycastHit[32];
+    static readonly RaycastHit[] PathHits = new RaycastHit[32];
+
+    static readonly int BaseColorID = Shader.PropertyToID("_BaseColor");
+    static readonly int ColorID = Shader.PropertyToID("_Color");
+
     CharacterController cc;
     ShinobiPlayerController playerController;
+    LayerMask aimMask;      // ワープ先になれる面(プレイヤー・敵・UIは除く)
+    LayerMask fitMask;      // 着地点に体が収まるかの判定(敵の体も障害物として扱う)
     float nextStepTime;
     Vector3 targetPoint;
     bool targetValid;
+    MaterialPropertyBlock mpb;
 
     void Awake()
     {
         cc = GetComponent<CharacterController>();
         playerController = GetComponent<ShinobiPlayerController>();
         if (aimCamera == null) aimCamera = Camera.main;
+
+        aimMask = BuildSolidMask();
+        fitMask = aimMask.value | EnemyLayerMask().value;
+
+        mpb = new MaterialPropertyBlock();
+        HideMarker();
     }
 
-    void OnEnable() { stepAction.Enable(); stepAction.performed += OnStep; }
-    void OnDisable() { stepAction.performed -= OnStep; stepAction.Disable(); }
+    // 地形が Default でも Environment でも、シーンの設定に関係なく当たるようにする
+    static LayerMask BuildSolidMask()
+    {
+        int mask = Physics.DefaultRaycastLayers;   // Ignore Raycast 以外の全レイヤー
+        mask &= ~(1 << 3);                         // Player
+        int ui = LayerMask.NameToLayer("UI");
+        if (ui >= 0) mask &= ~(1 << ui);
+        mask &= ~EnemyLayerMask().value;
+        return mask;
+    }
+
+    static LayerMask EnemyLayerMask()
+    {
+        int enemy = LayerMask.NameToLayer("Enemy");
+        return enemy >= 0 ? (1 << enemy) : 0;
+    }
+
+    void OnEnable()
+    {
+        stepAction.Enable();
+        stepAction.performed += OnStep;
+    }
+
+    void OnDisable()
+    {
+        stepAction.performed -= OnStep;
+        stepAction.Disable();
+        targetValid = false;
+        HideMarker();
+    }
 
     void Update()
     {
@@ -51,41 +99,104 @@ public class ShadowStepAbility : MonoBehaviour
     {
         targetValid = false;
 
-        // 自分(Playerレイヤー)は、照準の判定に含めない。Defaultレイヤーのままの場合は、壁まで除外するので何もしない
-        int selfLayer = gameObject.layer;
-        LayerMask mask = selfLayer == 0 ? groundMask : (LayerMask)(groundMask.value & ~(1 << selfLayer));
+        // カメラが無い/ゲームが終わっている時は何も指さない
+        if (aimCamera == null || (GameManager.Instance != null && !GameManager.Instance.IsPlaying))
+        {
+            HideMarker();
+            return;
+        }
 
         Ray ray = aimCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
-        if (Physics.Raycast(ray, out RaycastHit hit, maxRange, mask,
-                            QueryTriggerInteraction.Ignore))
+        if (!TryGetAimHit(ray, out RaycastHit hit))
         {
-            // 面から少し浮かせた位置で影判定(自己遮蔽を避ける)
-            Vector3 probe = hit.point + hit.normal * 0.1f;
-            bool inShadow = ShadowUtility.IsInShadow(probe, LightRegistry.All, occluderMask);
-
-            // 立てるだけの広さがあるかも簡易チェック
-            bool hasRoom = !Physics.CheckCapsule(
-                probe + Vector3.up * cc.radius,
-                probe + Vector3.up * (cc.height - cc.radius),
-                cc.radius * 0.9f, occluderMask, QueryTriggerInteraction.Ignore);
-
-            targetPoint = hit.point + hit.normal * 0.05f;
-            bool isFloor = hit.normal.y >= minGroundNormalY;   // 壁の側面には、ワープしない
-            targetValid = inShadow && hasRoom && isFloor;
-
-            if (marker != null)
-            {
-                marker.gameObject.SetActive(true);
-                marker.position = targetPoint;
-            }
-        }
-        else if (marker != null)
-        {
-            marker.gameObject.SetActive(false);
+            HideMarker();
+            return;
         }
 
-        if (markerRenderer != null)
-            markerRenderer.material.color = targetValid ? Color.cyan : Color.red;
+        Vector3 feet = hit.point + hit.normal * 0.05f;
+        targetPoint = feet;
+
+        bool isFloor = hit.normal.y >= minGroundNormalY;                      // 壁の側面には、ワープしない
+        bool inRange = Vector3.Distance(transform.position, feet) <= maxRange + 0.5f;
+        bool inShadow = IsInShadowAt(feet);
+        bool canFit = HasRoomAt(feet);
+        bool pathClear = !requireClearPath || HasClearPathTo(feet);
+
+        targetValid = isFloor && inRange && inShadow && canFit && pathClear;
+
+        ShowMarker(feet, targetValid);
+    }
+
+    /// <summary>カメラ中心のレイに当たった、自分以外の一番手前のコライダーを返す。</summary>
+    bool TryGetAimHit(Ray ray, out RaycastHit result)
+    {
+        result = default;
+
+        int count = Physics.RaycastNonAlloc(ray, AimHits, maxRange, aimMask, QueryTriggerInteraction.Ignore);
+        float nearest = float.MaxValue;
+        bool found = false;
+
+        for (int i = 0; i < count; i++)
+        {
+            RaycastHit h = AimHits[i];
+            if (h.collider == null) continue;
+            if (IsSelf(h.collider.transform)) continue;
+            if (marker != null && h.collider.transform.IsChildOf(marker)) continue;
+            if (h.distance >= nearest) continue;
+
+            nearest = h.distance;
+            result = h;
+            found = true;
+        }
+
+        return found;
+    }
+
+    /// <summary>その地点は影の中か。敵の視界判定(ShadowUtility)と同じ規則で調べる。</summary>
+    bool IsInShadowAt(Vector3 feet)
+    {
+        Vector3 probe = feet + Vector3.up * shadowProbeHeight;
+        return ShadowUtility.IsInShadow(probe, LightRegistry.All, aimMask);
+    }
+
+    /// <summary>その地点に、プレイヤーの体がめり込まずに立てるか。</summary>
+    bool HasRoomAt(Vector3 feet)
+    {
+        Vector3 bottom = feet + Vector3.up * (cc.radius + 0.05f);
+        Vector3 top = feet + Vector3.up * (cc.height - cc.radius);
+        float radius = cc.radius * clearanceScale;
+
+        return !Physics.CheckCapsule(bottom, top, radius, fitMask, QueryTriggerInteraction.Ignore);
+    }
+
+    /// <summary>今いる場所から着地点まで、壁などに遮られていないか(壁ごしのワープ防止)。</summary>
+    bool HasClearPathTo(Vector3 feet)
+    {
+        Vector3 start = transform.position + Vector3.up * 0.1f;
+        Vector3 end = feet + Vector3.up * (cc.height * 0.5f - cc.center.y);
+
+        Vector3 delta = end - start;
+        float distance = delta.magnitude;
+        if (distance < 0.05f) return true;
+
+        int count = Physics.RaycastNonAlloc(new Ray(start, delta / distance), PathHits,
+                                            distance, aimMask, QueryTriggerInteraction.Ignore);
+        for (int i = 0; i < count; i++)
+        {
+            RaycastHit h = PathHits[i];
+            if (h.collider == null) continue;
+            if (IsSelf(h.collider.transform)) continue;
+            if (marker != null && h.collider.transform.IsChildOf(marker)) continue;
+            return false;   // 途中に障害物がある
+        }
+
+        return true;
+    }
+
+    /// <summary>自分(プレイヤー)のコライダーかどうか。</summary>
+    bool IsSelf(Transform t)
+    {
+        return t == transform || t.IsChildOf(transform);
     }
 
     void OnStep(InputAction.CallbackContext _)
@@ -99,8 +210,8 @@ public class ShadowStepAbility : MonoBehaviour
     {
         // transform.position は足元ではなく、Capsuleの中心にある。
         // 足元が目標の地点に来るように、中心の位置を計算する(体が地面に埋まらないように)
-        Vector3 pivotOffset = Vector3.up * (cc.height * 0.5f) - cc.center;
-        Vector3 pivotPosition = feetPosition + pivotOffset + Vector3.up * cc.skinWidth;
+        Vector3 pivotOffset = Vector3.up * (cc.height * 0.5f - cc.center.y);
+        Vector3 pivotPosition = feetPosition + pivotOffset + Vector3.up * (cc.skinWidth + 0.01f);
 
         // CharacterControllerは無効化しないと位置を直接書き換えられない
         cc.enabled = false;
@@ -109,6 +220,38 @@ public class ShadowStepAbility : MonoBehaviour
 
         if (playerController != null) playerController.ResetVerticalVelocity();
 
+        targetValid = false;
+        HideMarker();
+
         // TODO: 消える/現れるVFX、SE、短い無敵時間など
+    }
+
+    // ---------- マーカー表示 ----------
+    void ShowMarker(Vector3 position, bool valid)
+    {
+        if (marker == null) return;
+
+        if (!marker.gameObject.activeSelf) marker.gameObject.SetActive(true);
+        marker.position = position + Vector3.up * 0.02f;
+
+        if (markerRenderer == null) return;
+        Color color = valid ? Color.cyan : Color.red;
+        markerRenderer.GetPropertyBlock(mpb);
+        mpb.SetColor(BaseColorID, color);   // URP Lit
+        mpb.SetColor(ColorID, color);       // 互換用
+        markerRenderer.SetPropertyBlock(mpb);
+    }
+
+    void HideMarker()
+    {
+        if (marker != null && marker.gameObject.activeSelf)
+            marker.gameObject.SetActive(false);
+    }
+
+    // Sceneビューで、ワープできる距離を確認するためのギズモ
+    void OnDrawGizmosSelected()
+    {
+        Gizmos.color = new Color(0.2f, 0.9f, 1f, 0.6f);
+        Gizmos.DrawWireSphere(transform.position, maxRange);
     }
 }
