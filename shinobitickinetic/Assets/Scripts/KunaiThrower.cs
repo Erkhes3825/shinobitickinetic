@@ -70,8 +70,7 @@ public class KunaiThrower : MonoBehaviour
 
         // 画面中央が指す点を求める
         Ray ray = aimCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
-        bool aimHit = Physics.Raycast(ray, out RaycastHit hit, maxAimDistance, mask,
-                                      QueryTriggerInteraction.Ignore);
+        bool aimHit = Physics.Raycast(ray, out RaycastHit hit, maxAimDistance, mask, QueryTriggerInteraction.Ignore);
         Vector3 target = aimHit ? hit.point : ray.origin + ray.direction * maxAimDistance;
 
         // 発射の基準点(プレイヤーの胸あたり)から、狙いの点へ向かう方向

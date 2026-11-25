@@ -22,7 +22,7 @@ public class EnemyAI : MonoBehaviour
     [SerializeField] float viewDistance = 12f;
     [SerializeField] float viewAngle = 70f;       // 全角。Spot Lightの角度と合わせる
     [SerializeField] float shadowDetectRange = 2f; // 影の中でもこの距離以内なら気づく
-    [SerializeField] LayerMask occluderMask;      // Environment を設定
+    [SerializeField] LayerMask occluderMask;      // 遮蔽物。空(0)なら自動(地形の全レイヤー)
 
     [Header("警戒度")]
     [SerializeField] float gainPerSecond = 1.0f;  // 近いほど最大2倍まで加速
@@ -37,6 +37,8 @@ public class EnemyAI : MonoBehaviour
     [SerializeField] float searchWaitTime = 4f;
     [SerializeField] float catchDistance = 1.2f;
 
+    static readonly RaycastHit[] SightHits = new RaycastHit[16];
+
     NavMeshAgent agent;
     State state = State.Patrol;
     float awareness;          // 0〜1
@@ -49,6 +51,44 @@ public class EnemyAI : MonoBehaviour
     {
         agent = GetComponent<NavMeshAgent>();
         if (eyes == null) eyes = transform;
+        if (occluderMask.value == 0) occluderMask = BuildAutoOccluderMask();
+    }
+
+    // 未設定なら「地形になりうるレイヤー全部」を遮蔽物として扱う。
+    // プレイヤーや敵自身のコライダーは、当たっても遮蔽物とみなさない(HasLineOfSight 側で除外)。
+    static LayerMask BuildAutoOccluderMask()
+    {
+        int mask = Physics.DefaultRaycastLayers;
+        int ui = LayerMask.NameToLayer("UI");
+        if (ui >= 0) mask &= ~(1 << ui);
+        int playerLayer = LayerMask.NameToLayer("Player");
+        if (playerLayer >= 0) mask &= ~(1 << playerLayer);
+        int enemy = LayerMask.NameToLayer("Enemy");
+        if (enemy >= 0) mask &= ~(1 << enemy);
+        return mask;
+    }
+
+    /// <summary>視線が地形に遮られていないか。自分とプレイヤー自身の体は無視する。</summary>
+    bool HasLineOfSight(Vector3 from, Vector3 to)
+    {
+        Vector3 delta = to - from;
+        float dist = delta.magnitude;
+        if (dist < 0.001f) return true;
+
+        int count = Physics.RaycastNonAlloc(from, delta / dist, SightHits, dist,
+                                            occluderMask, QueryTriggerInteraction.Ignore);
+        for (int i = 0; i < count; i++)
+        {
+            Collider c = SightHits[i].collider;
+            if (c == null || c.transform == null) continue;
+
+            Transform t = c.transform;
+            if (t == transform || t.IsChildOf(transform)) continue;                 // 自分の体
+            if (player != null && (t == player || t.IsChildOf(player))) continue;   // プレイヤー自身
+            return false;
+        }
+
+        return true;
     }
 
     void Start()
@@ -103,7 +143,7 @@ public class EnemyAI : MonoBehaviour
         if (Vector3.Angle(eyes.forward, to) > viewAngle * 0.5f) return false;
 
         // 壁などで視線が遮られていないか
-        if (Physics.Raycast(eyePos, to / dist, dist, occluderMask, QueryTriggerInteraction.Ignore))
+        if (!HasLineOfSight(eyePos, target))
             return false;
 
         // 影の中なら、至近距離でない限り見えない

@@ -46,7 +46,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 763308ed2c3aa3947a6e3cdf44615d1d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::BreakableLight
-  lights: []
+  lights:
+  - {fileID: 5869131441697677849}
   glowRenderers:
   - {fileID: 6735488399512412575}
   sparks: {fileID: 0}
@@ -65,7 +66,7 @@ GameObject:
   - component: {fileID: 4086161898681600447}
   - component: {fileID: 8680930775571492083}
   m_Layer: 6
-  m_Name: Pole
+  m_Name: Post
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -80,8 +81,8 @@ Transform:
   m_GameObject: {fileID: 4721147715065921208}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 2, z: 0}
-  m_LocalScale: {x: 0.2, y: 0.2, z: 0.2}
+  m_LocalPosition: {x: 0, y: 1.1, z: 0}
+  m_LocalScale: {x: 0.18, y: 1.1, z: 0.18}
   m_ConstrainProportionsScale: 1
   m_Children: []
   m_Father: {fileID: 924815686731198242}
@@ -119,7 +120,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: 7c1f4a2b9d3e4f5a8b6c1d2e3f4a5b6c, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0

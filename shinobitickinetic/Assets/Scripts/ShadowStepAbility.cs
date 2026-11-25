@@ -5,8 +5,9 @@ using UnityEngine.InputSystem;
 /// 影渡り: カメラ中心が指す地点が影の中なら、そこへワープする。
 /// プレイヤー(CharacterController付き)にアタッチして使う。
 ///
-/// 判定に使うレイヤーは、シーンのレイヤー設定に依存せず自動で決める
-/// (地形が Default でも Environment でも動くようにするため)。
+/// 判定に使うレイヤーは Inspector で指定できる。空(0)のときは
+/// シーンのレイヤー設定に依存せず自動で決める(地形が Default でも
+/// Environment でも動くようにするため)。
 /// </summary>
 [RequireComponent(typeof(CharacterController))]
 public class ShadowStepAbility : MonoBehaviour
@@ -17,6 +18,8 @@ public class ShadowStepAbility : MonoBehaviour
     [SerializeField] Renderer markerRenderer;
 
     [Header("判定")]
+    [SerializeField] LayerMask groundMask;        // ワープ先になれる面。空(0)なら自動(地形の全レイヤー)
+    [SerializeField] LayerMask occluderMask;      // 影の遮蔽物。空(0)なら groundMask と同じ
     [SerializeField] float maxRange = 25f;        // カメラ中心から、ワープ先を探す距離
     [SerializeField, Range(0f, 1f)] float minGroundNormalY = 0.7f;   // 床とみなす面の傾き(1=真上向き。壁の側面は除外)
     [SerializeField] float shadowProbeHeight = 1f;                   // 影かどうかを調べる高さ(足元から)。敵の視界判定と同じ胸の高さ
@@ -33,14 +36,16 @@ public class ShadowStepAbility : MonoBehaviour
     // RaycastNonAlloc 用の使い回しバッファ(GC負荷を避ける)
     static readonly RaycastHit[] AimHits = new RaycastHit[32];
     static readonly RaycastHit[] PathHits = new RaycastHit[32];
+    static readonly Collider[] FitHits = new Collider[16];
 
     static readonly int BaseColorID = Shader.PropertyToID("_BaseColor");
     static readonly int ColorID = Shader.PropertyToID("_Color");
 
     CharacterController cc;
     ShinobiPlayerController playerController;
-    LayerMask aimMask;      // ワープ先になれる面(プレイヤー・敵・UIは除く)
-    LayerMask fitMask;      // 着地点に体が収まるかの判定(敵の体も障害物として扱う)
+    LayerMask aimMask;      // groundMask の実効値(ワープ先になれる面)
+    LayerMask solidMask;    // 地形全体(プレイヤー・敵・UIは除く)。壁ごし/埋まり判定用
+    LayerMask fitMask;      // solidMask + 敵(着地点に体が収まるかの判定)
     float nextStepTime;
     Vector3 targetPoint;
     bool targetValid;
@@ -52,8 +57,13 @@ public class ShadowStepAbility : MonoBehaviour
         playerController = GetComponent<ShinobiPlayerController>();
         if (aimCamera == null) aimCamera = Camera.main;
 
-        aimMask = BuildSolidMask();
-        fitMask = aimMask.value | EnemyLayerMask().value;
+        // 空(0)なら自動で決める(Inspector で指定した場合はそちらを優先)
+        if (groundMask.value == 0) groundMask = BuildSolidMask();
+        if (occluderMask.value == 0) occluderMask = groundMask;
+
+        aimMask = groundMask;
+        solidMask = BuildSolidMask();   // 壁ごし/埋まり判定は groundMask の設定に依らず地形全体で見る
+        fitMask = solidMask.value | EnemyLayerMask().value;
 
         mpb = new MaterialPropertyBlock();
         HideMarker();
@@ -141,7 +151,7 @@ public class ShadowStepAbility : MonoBehaviour
             RaycastHit h = AimHits[i];
             if (h.collider == null) continue;
             if (IsSelf(h.collider.transform)) continue;
-            if (marker != null && h.collider.transform.IsChildOf(marker)) continue;
+            if (IsMarker(h.collider.transform)) continue;
             if (h.distance >= nearest) continue;
 
             nearest = h.distance;
@@ -156,7 +166,7 @@ public class ShadowStepAbility : MonoBehaviour
     bool IsInShadowAt(Vector3 feet)
     {
         Vector3 probe = feet + Vector3.up * shadowProbeHeight;
-        return ShadowUtility.IsInShadow(probe, LightRegistry.All, aimMask);
+        return ShadowUtility.IsInShadow(probe, LightRegistry.All, occluderMask);
     }
 
     /// <summary>その地点に、プレイヤーの体がめり込まずに立てるか。</summary>
@@ -166,7 +176,18 @@ public class ShadowStepAbility : MonoBehaviour
         Vector3 top = feet + Vector3.up * (cc.height - cc.radius);
         float radius = cc.radius * clearanceScale;
 
-        return !Physics.CheckCapsule(bottom, top, radius, fitMask, QueryTriggerInteraction.Ignore);
+        // 自分の体(プレイヤー自身)は障害物として数えない
+        int count = Physics.OverlapCapsuleNonAlloc(bottom, top, radius, FitHits, fitMask, QueryTriggerInteraction.Ignore);
+        for (int i = 0; i < count; i++)
+        {
+            Collider c = FitHits[i];
+            if (c == null || c.transform == null) continue;
+            if (IsSelf(c.transform)) continue;
+            if (IsMarker(c.transform)) continue;
+            return false;   // 壁や敵の体が重なっている
+        }
+
+        return true;
     }
 
     /// <summary>今いる場所から着地点まで、壁などに遮られていないか(壁ごしのワープ防止)。</summary>
@@ -180,13 +201,13 @@ public class ShadowStepAbility : MonoBehaviour
         if (distance < 0.05f) return true;
 
         int count = Physics.RaycastNonAlloc(new Ray(start, delta / distance), PathHits,
-                                            distance, aimMask, QueryTriggerInteraction.Ignore);
+                                            distance, solidMask, QueryTriggerInteraction.Ignore);
         for (int i = 0; i < count; i++)
         {
             RaycastHit h = PathHits[i];
             if (h.collider == null) continue;
             if (IsSelf(h.collider.transform)) continue;
-            if (marker != null && h.collider.transform.IsChildOf(marker)) continue;
+            if (IsMarker(h.collider.transform)) continue;
             return false;   // 途中に障害物がある
         }
 
@@ -197,6 +218,12 @@ public class ShadowStepAbility : MonoBehaviour
     bool IsSelf(Transform t)
     {
         return t == transform || t.IsChildOf(transform);
+    }
+
+    /// <summary>着地点マーカーのコライダーかどうか。</summary>
+    bool IsMarker(Transform t)
+    {
+        return marker != null && (t == marker || t.IsChildOf(marker));
     }
 
     void OnStep(InputAction.CallbackContext _)
